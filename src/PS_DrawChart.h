@@ -21,7 +21,6 @@ public:
     struct SERIES
     {
         vector<float> vData;
-        vector<float> vColor;
         std::string strTitle;
         vec3f color;        
     };
@@ -41,13 +40,21 @@ public:
     bool addSeries(const vector<float>& seriesData,
                    const string& strTitle,
 				   float scaleY,
-                   const vec2f& offset = vec2f(0,0),
-                   const vec3f& color = vec3f(0,0,0));
+				   const vec2f& offset = vec2f(0,0),
+				   const vec3f& color = vec3f(0,0,0));
+    bool addSeries(const vector<double>& seriesData,
+    		const string& strTitle,
+    		float scaleY,
+    		const vec2f& offset,
+    		const vec3f& color);
+
 
     void cleanup();
 
-    void draw(int plotMode = PLOT_LINE_STRIP);
+    void draw(int plotMode);
+    void draw(int iSeries, int plotMode);
 
+    U32 countSeries() const { return m_series.size();}
     void setSelectedSeries(int idxSelected) {m_idxSelectedSeries = idxSelected;}
     int getSelectedSeries() const {return m_idxSelectedSeries;}
 private:

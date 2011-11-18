@@ -11,13 +11,16 @@ using namespace std;
 
 #include "GL/glew.h"
 #include "GL/freeglut.h"
-
-#include "PS_CPU_INFO.h"
-#include "PS_SIMDVecN.h"
+#include <vector>
 
 #include "AA_Models/PS_FileDirectory.h"
 #include "AA_Models/PS_SketchConfig.h"
 #include "MarSystemManager.h"
+
+#include "PS_CPU_INFO.h"
+#include "PS_MDCT.h"
+#include "PS_DrawChart.h"
+
 
 #ifdef WIN32
 	#include <io.h>
@@ -28,6 +31,9 @@ using namespace std;
 	#include <dirent.h>
 	#include <unistd.h>
 #endif
+
+#include "tbb/task_scheduler_init.h"
+#include "tbb/tick_count.h"
 
 #define WINDOW_SIZE_WIDTH 640
 #define WINDOW_SIZE_HEIGHT 480
@@ -44,10 +50,25 @@ void Resize(int w, int h);
 void Keyboard(int key, int x, int y);
 void MousePress(int button, int state, int x, int y);
 void MouseMove(int x, int y);
+void InitGL();
 
+
+
+struct AppSettings{
+	int ctThreadCountStart;
+	int ctThreadCountEnd;
+	int ctThreads;
+};
+
+
+tbb::task_scheduler_init* g_lpTaskSchedular = NULL;
+CDrawChart* g_lpDrawChart = NULL;
+AppSettings g_appSettings;
+//////////////////////////////////////////////////////////////////////////////
 void Close()
 {
-
+	SAFE_DELETE(g_lpTaskSchedular);
+	SAFE_DELETE(g_lpDrawChart);
 }
 
 void Display()
@@ -55,14 +76,20 @@ void Display()
 	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
 
 	glLoadIdentity();
-	//glRotatef(180.0f, 0.0f, 1.0f, 0.0f);
-	//glTranslatef(0.0f, 0.0f, 10.0f);
 
-	/*
-	vec3f p = g_arcBallCam.getCoordinates();
-	vec3f c = g_arcBallCam.getCenter();
-	gluLookAt(p.x, p.y, p.z, c.x, c.y, c.z, 0.0f, 1.0f, 0.0f);
-	*/
+	if(g_lpDrawChart->countSeries() > 0)
+	{
+		//glPushMatrix()
+		U32 ctSeries = g_lpDrawChart->countSeries();
+		float dd = 1.0f / (float)ctSeries;
+		for(int i=0; i<ctSeries; i++)
+		{
+			glPushMatrix();
+			glTranslatef(0.0f, i * dd, i * dd);
+				g_lpDrawChart->draw(i, PLOT_LINE_STRIP);
+			glPopMatrix();
+		}
+	}
 
 	glutSwapBuffers();
 }
@@ -130,7 +157,7 @@ void sfPlay(string strSoundFP)
 	}
 }
 
-void processMDCT(string strSoundFP, U32 windowSize = 1)
+U32 ReadSoundFile(string strSoundFP, std::vector<double>& outputData, U32 windowSize = 1)
 {
 	MarSystemManager mng;
 
@@ -139,11 +166,15 @@ void processMDCT(string strSoundFP, U32 windowSize = 1)
 
 	// The sound file
 	net->addMarSystem(mng.create("SoundFileSource", "src"));
+
+	//Set input filename
 	net->updControl("SoundFileSource/src/mrs_string/filename", strSoundFP);
+
+	//Set offset from the beginning of the song
 	net->updControl("SoundFileSource/src/mrs_natural/pos", 0);
-	//net->updControl("SoundFileSource/src/mrs_natural/pos", position_);
+
+	//Window size
 	net->setctrl("mrs_natural/inSamples", windowSize);
-	net->addMarSystem(mng.create("MaxMin","maxmin"));
 
 	mrs_natural channels = net->getctrl("mrs_natural/onObservations")->to<mrs_natural>();
 
@@ -151,34 +182,31 @@ void processMDCT(string strSoundFP, U32 windowSize = 1)
 
 	realvec processedData;
 
-	double y_max_left = 0;
-	double y_min_left = 0;
-
-	double y_max_right = 0;
-	double y_min_right = 0;
-
 	//Get Data Chunks and perform MDCT
 	U32 ctTicks = 0;
+
+	outputData.reserve(512 * 1024);
+
+	//Temp Array
+	std::vector<double> arrTemp;
+	arrTemp.resize(512);
 	while (net->getctrl("SoundFileSource/src/mrs_bool/hasData")->to<mrs_bool>())
 	{
 		ctTicks++;
-
 		net->tick();
 		processedData = net->getctrl("mrs_realvec/processedData")->to<mrs_realvec>();
 
 		U32 szData = processedData.getSize();
-		y_max_left = processedData(0,0);
-		y_min_left = processedData(0,1);
-		//processedData.getCols();
+		memcpy(&arrTemp[0], processedData.getData(), szData * sizeof(double));
 
-		if (channels == 2)
-		{
-			y_max_right = processedData(1,0);
-			y_min_right = processedData(1,1);
-		}
+		//Copy to output
+		outputData.insert(outputData.end(), arrTemp.begin(), arrTemp.end());
 	}
 
+	arrTemp.resize(0);
 	delete net;
+
+	return ctTicks;
 }
 
 int ListFilesDir(std::vector<string>& vPaths, const char* chrPath, const char* chrExt, bool bDirOnly)
@@ -227,6 +255,10 @@ int ListFilesDir(std::vector<string>& vPaths, const char* chrPath, const char* c
 	return vPaths.size();
 }
 
+void InitGL()
+{
+
+}
 
 //Main
 int main(int argc, char* argv[]) {
@@ -274,6 +306,7 @@ int main(int argc, char* argv[]) {
 		}
 	}
 	printf("**********************************************************************************\n");
+	g_lpDrawChart = new CDrawChart();
 
 	//Init GL
 	glutInit(&argc, argv);
@@ -286,26 +319,8 @@ int main(int argc, char* argv[]) {
 	glutMotionFunc(MouseMove);
 	glutSpecialFunc(Keyboard);
 	glutCloseFunc(Close);
-
 	//////////////////////////////////////////////////////////////
 	//Initialization
-	static const GLfloat lightColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	static const GLfloat lightPos[4] = { 5.0f, 5.0f, 10.0f, 0.0f };
-
-	//glFrontFace(GL_CCW);
-	//Set Colors of Light
-	glLightfv(GL_LIGHT0, GL_AMBIENT, lightColor);
-	glLightfv(GL_LIGHT0, GL_DIFFUSE, lightColor);
-	glLightfv(GL_LIGHT0, GL_SPECULAR, lightColor);
-
-	//Set Light Position
-	glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
-
-	//Turn on Light 0
-	glEnable(GL_LIGHT0);
-
-	//Enable Lighting
-	glEnable(GL_LIGHTING);
 	//Enable features we want to use from OpenGL
 	glShadeModel(GL_SMOOTH);
 	glEnable(GL_DEPTH_TEST);
@@ -323,6 +338,7 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
+	///////////////////////////////////////////////////////////////////////////////////
 	std::vector<string> vFiles;
 	{
 		//Create a list of all files
@@ -348,14 +364,43 @@ int main(int argc, char* argv[]) {
 		SAFE_DELETE(lpConfig);
 	}
 
-	printf("Start Feature Extraction on %d files.\n", vFiles.size());
 
-	if(vFiles.size() > 0)
+	printf("Start Feature Extraction on %u files.\n", vFiles.size());
+
+	SAFE_DELETE(g_lpTaskSchedular);
+	g_appSettings.ctThreads = tbb::task_scheduler_init::default_num_threads();
+	g_lpTaskSchedular = new tbb::task_scheduler_init(g_appSettings.ctThreads);
+	printf("Parallel MDCT - Initialized with %d threads. \n", g_appSettings.ctThreads);
+
+
+	double ms;
+
+	int ctFiles = 5;
+	if(vFiles.size() > 5)
 	{
-		//sfPlay(vFiles[0]);
-		processMDCT(vFiles[0], 1);
-	}
+		for(U32 i=0; i<ctFiles; i++)
+		{
+			tbb::tick_count t0 = tbb::tick_count::now();
 
+			std::vector<double> arrInputSignal;
+			std::vector<double> arrOutputSpectrum;
+			ReadSoundFile(vFiles[i], arrInputSignal, 1);
+			ApplyMDCT(arrInputSignal, arrOutputSpectrum);
+			arrInputSignal.resize(0);
+
+			tbb::tick_count t1 = tbb::tick_count::now();
+			ms += (t1 - t0).seconds();
+			printf("File %s processed in %.2f [ms] \n", vFiles[i].c_str(), ms * 1000.0);
+
+			NormalizeData<double>(arrOutputSpectrum);
+
+			vec3f c;
+			c.x = RandRangeT<float>(0.0f, 1.0f);
+			c.y = RandRangeT<float>(0.0f, 1.0f);
+			c.z = RandRangeT<float>(0.0f, 1.0f);
+			g_lpDrawChart->addSeries(arrOutputSpectrum, "Spectrum", 1.0f, vec2f(0.0, 1.5f), c);
+		}
+	}
 
 
 	glutMainLoop();
