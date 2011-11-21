@@ -4,13 +4,14 @@
  *  Created on: 2011-11-16
  *      Author: pourya
  */
-
+#pragma once
 #ifndef PS_MDCT_H_
 #define PS_MDCT_H_
 
 #include "PS_SIMDVecN.h"
 #include "tbb/blocked_range.h"
 #include "tbb/parallel_for.h"
+#include "tbb/enumerable_thread_specific.h"
 #include <vector>
 
 using namespace tbb;
@@ -19,6 +20,8 @@ using namespace std;
 #define FRAME_DATA_COUNT 512
 #define FRAMES_IN_CHUNK 8
 
+typedef tbb::enumerable_thread_specific< std::pair<int,int> >  CounterProcessedFrames;
+//CounterProcessedFrames g_ctTotalFrames( std::make_pair(0, 0));
 //Compute Modified Discrete Cosine Transform
 template<typename T, U32 ctDataLength, U32 ctFramesInChunk>
 struct PS_BEGIN_ALIGNED(PS_SIMD_FLEN) SOAFRAMECHUNKS
@@ -43,36 +46,60 @@ public:
 private:
 	CHUNKS1 *m_lpChunksOdd;
 	CHUNKS1 *m_lpChunksEven;
-	CHUNKS1 *m_lpSpectrum;
+	//CHUNKS1 *m_lpSpectrum;
+	T* m_lpSpectrum;
+	U32 m_szSpectrum;
 	U32 m_ctChunks;
 
 public:
-	CMDCTComputer(CHUNKS1* lpChunksOdd, CHUNKS1* lpChunksEven, CHUNKS1* lpSpectrum, U32 ctChunks)
+	CMDCTComputer(CHUNKS1* lpChunksOdd, CHUNKS1* lpChunksEven, T* lpSpectrum, U32 szSpectrum, U32 ctChunks)
 	{
 		m_lpChunksOdd  = lpChunksOdd;
 		m_lpChunksEven = lpChunksEven;
 		m_lpSpectrum   = lpSpectrum;
 		m_ctChunks 	   = ctChunks;
+		m_szSpectrum   = szSpectrum;
 	}
 
 	void operator()(const blocked_range<size_t>& range) const
 	{
+		///CounterProcessedFrames::reference localCounter = g_ctTotalFrames.local();
+
 		for(size_t i=range.begin(); i != range.end(); i++)
-			process(m_lpChunksOdd[i], m_lpChunksEven[i], m_lpSpectrum[i], i != m_ctChunks - 1);
+		{
+			process(m_lpChunksOdd[i], m_lpChunksEven[i], i, i != m_ctChunks - 1);
+			//++localCounter.first;
+		}
 	}
 
-	void process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, CHUNKS1& output, bool bComputeEven) const;
+	void process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, int iChunk, bool bComputeEven) const;
 	void commonKernel(const T* lpInput, T* lpOutput) const;
 };
 
+/*
+void PrintThreadWorkHistory(int ctAttempts = 1)
+{
+	//Print Results
+	int idxThread = 0;
+	for(CounterProcessedFrames::const_iterator i = g_ctTotalFrames.begin(); i != g_ctTotalFrames.end(); i++)
+	{
+		idxThread++;
+		printf("Thread#  %d, Processed Frames %d \n", idxThread, (int)i->first / ctAttempts);
+	}
+	g_ctTotalFrames.clear();
+}
+*/
+
 template<typename T>
-void CMDCTComputer<T>::process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, CHUNKS1& output, bool bComputeEven) const
+void CMDCTComputer<T>::process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, int iChunk, bool bComputeEven) const
 {
 	U32 hn = FRAME_DATA_COUNT / 2;
 	T d;
 
 	T piOver2N = Pi / (T)(2 * FRAME_DATA_COUNT);
-	T *pd = &output.data[0];
+
+	T *pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT];
+	//T *pd = &output.data[0];
 
 	//ODD
 	for(U32 k=0; k<hn; k++)
@@ -88,7 +115,8 @@ void CMDCTComputer<T>::process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven
 	//EVEN
 	if(bComputeEven)
 	{
-		pd = &output.data[hn];
+		pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT + hn];
+		//pd = &output.data[hn];
 		for(U32 k=0; k<hn; k++)
 		{
 			d = 0.0;
@@ -154,17 +182,20 @@ void CMDCTComputer<T>::commonKernel(const T* lpInput, T* lpOutput) const
 }
 
 template<typename T>
-bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput)
+bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput, int& ctFrames)
 {
 	U32 szData = arrSignalData.size();
-	U32 ctFrames = szData / FRAME_DATA_COUNT;
-	U32 ctChunks = ctFrames;
+	ctFrames = szData / FRAME_DATA_COUNT;
 
-	//typedef CMDCTComputer<T>::CHUNKS1 CHUNKS1;
+	U32 ctChunks   = ctFrames;
+	U32 szSpectrum = FRAME_DATA_COUNT*ctChunks;
+
+	//Setup Input Chunkss
 	typedef SOAFRAMECHUNKS<T, FRAME_DATA_COUNT, 1> CHUNKS1;
 	CHUNKS1 *lpChunksOdd  = reinterpret_cast<CHUNKS1*>(AllocAligned(sizeof(CHUNKS1) * ctChunks));
 	CHUNKS1 *lpChunksEven = reinterpret_cast<CHUNKS1*>(AllocAligned(sizeof(CHUNKS1) * ctChunks));
-	CHUNKS1 *lpSpectrum   = reinterpret_cast<CHUNKS1*>(AllocAligned(sizeof(CHUNKS1) * ctChunks));
+	T* lpSpectrum = reinterpret_cast<T*>(AllocAligned(sizeof(T) * szSpectrum));
+
 
 	//Odd
 	const T* lpSourceBegin = &arrSignalData[0];
@@ -192,20 +223,15 @@ bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput)
 		szData -= szCopy;
 	}
 
-	CMDCTComputer<T> body(lpChunksOdd, lpChunksEven, lpSpectrum, ctChunks);
+	//Run Parallel MDCT algorithm to compute
+	CMDCTComputer<T> body(lpChunksOdd, lpChunksEven, lpSpectrum, szSpectrum, ctChunks);
 	tbb::parallel_for(blocked_range<size_t>(0, ctChunks), body, tbb::auto_partitioner());
 
 	FreeAligned(lpChunksOdd);
 	FreeAligned(lpChunksEven);
 	/////////////////////////////////////////////////////////////
 	arrOutput.resize(0);
-	std::vector<T> arrTemp;
-	arrTemp.resize(FRAME_DATA_COUNT);
-	for(U32 i=0; i<ctChunks; i++)
-	{
-		memcpy(&arrTemp[0], lpSpectrum[i].data, FRAME_DATA_COUNT * sizeof(T));
-		arrOutput.insert(arrOutput.begin(), arrTemp.begin(), arrTemp.end());
-	}
+	arrOutput.insert(arrOutput.end(), &lpSpectrum[0], &lpSpectrum[szSpectrum]);
 
 	FreeAligned(lpSpectrum);
 
