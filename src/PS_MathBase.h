@@ -249,5 +249,24 @@ __inline T RandRangeT(T nMin, T nMax)
 	return nMin + r*(nMax - nMin);
 }
 
+//Fitting parabola y = A + Bx + Cx^2 = 0 with constraints of:
+//A = 0 and A + B(pi/2) + C(pi/2)^2 = 1 and A + B(pi) + C(pi)^2 = 0
+//http://www.uc-forum.com/forum/c-and-c/57668-fast-sine-and-cosine-simd.html
+__inline float FastSine(float x)
+{
+	const float B = 4/Pi;
+	const float C = -4/(Pi*Pi);
+
+	float y = B * x + C * x * Absolutef(x);
+
+	//Fitting parabola
+	 #ifdef EXTRA_PRECISION
+	// const float Q = 0.775;
+	const float P = 0.225;
+		y = P * (y * Absolutef(y) - y) + y; // Q * y + P * y * abs(y)
+	#endif
+	return y;
+}
+
 
 #endif

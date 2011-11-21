@@ -157,7 +157,8 @@ void sfPlay(string strSoundFP)
 	}
 }
 
-U32 ReadSoundFile(string strSoundFP, std::vector<double>& outputData, U32 windowSize = 1)
+template<typename T>
+U32 ReadSoundFile(string strSoundFP, std::vector<T>& outputData, U32 windowSize = 1)
 {
 	MarSystemManager mng;
 
@@ -188,7 +189,7 @@ U32 ReadSoundFile(string strSoundFP, std::vector<double>& outputData, U32 window
 	outputData.reserve(512 * 1024);
 
 	//Temp Array
-	std::vector<double> arrTemp;
+	std::vector<T> arrTemp;
 	arrTemp.resize(512);
 	while (net->getctrl("SoundFileSource/src/mrs_bool/hasData")->to<mrs_bool>())
 	{
@@ -197,7 +198,7 @@ U32 ReadSoundFile(string strSoundFP, std::vector<double>& outputData, U32 window
 		processedData = net->getctrl("mrs_realvec/processedData")->to<mrs_realvec>();
 
 		U32 szData = processedData.getSize();
-		memcpy(&arrTemp[0], processedData.getData(), szData * sizeof(double));
+		memcpy(&arrTemp[0], processedData.getData(), szData * sizeof(T));
 
 		//Copy to output
 		outputData.insert(outputData.end(), arrTemp.begin(), arrTemp.end());
@@ -375,24 +376,30 @@ int main(int argc, char* argv[]) {
 
 	double ms;
 
-	int ctFiles = 5;
+	int ctFiles = 1;
 	if(vFiles.size() > 5)
 	{
 		for(U32 i=0; i<ctFiles; i++)
 		{
-			tbb::tick_count t0 = tbb::tick_count::now();
-
 			std::vector<double> arrInputSignal;
 			std::vector<double> arrOutputSpectrum;
-			ReadSoundFile(vFiles[i], arrInputSignal, 1);
-			ApplyMDCT(arrInputSignal, arrOutputSpectrum);
+
+			tbb::tick_count t0 = tbb::tick_count::now();
+
+			//1. Read Sound Files
+			ReadSoundFile<double>(vFiles[i], arrInputSignal, 1);
+
+			//2. Apply MDCT
+			ApplyMDCT<double>(arrInputSignal, arrOutputSpectrum);
 			arrInputSignal.resize(0);
 
 			tbb::tick_count t1 = tbb::tick_count::now();
-			ms += (t1 - t0).seconds();
+			ms = (t1 - t0).seconds();
 			printf("File %s processed in %.2f [ms] \n", vFiles[i].c_str(), ms * 1000.0);
 
+			//3. Normalized Output
 			NormalizeData<double>(arrOutputSpectrum);
+			//arrOutputSpectrum.resize(100);
 
 			vec3f c;
 			c.x = RandRangeT<float>(0.0f, 1.0f);

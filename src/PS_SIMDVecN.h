@@ -304,6 +304,69 @@ static const VecNMask PS_SIMD_ALLZERO( 0, 0, 0, 0 );
 static const VecNMask VecNMaskFull = PS_SIMD_ALLONE.u.v;
 static const VecNMask VecNMaskEmpty = PS_SIMD_ALLZERO.u.v;
 
+//Fitting parabola y = A + Bx + Cx^2 = 0 with constraints of:
+//A = 0 and A + B(pi/2) + C(pi/2)^2 = 1 and A + B(pi) + C(pi)^2 = 0
+//http://www.uc-forum.com/forum/c-and-c/57668-fast-sine-and-cosine-simd.html
+//
+inline __m128 SIMDSine( __m128 x4 )
+{
+	static const __m128 fourdivPI4 = _mm_set_ps1(4.0f / Pi);
+	static const __m128 minfourdivPIsqr4 = _mm_set_ps1(-4.0f / (Pi * Pi));
+	static const __m128 PW = _mm_set_ps1(0.225f);
+	static const VecNMask SignCap( 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF );
+
+    __m128 y = _mm_add_ps( _mm_mul_ps( fourdivPI4, x4 ), _mm_mul_ps( minfourdivPIsqr4, _mm_mul_ps( x4, _mm_and_ps( x4, SignCap.u.v ))));
+
+    //y = P * (y * Absolutef(y) - y) + y;
+	return _mm_add_ps(_mm_mul_ps(PW, _mm_sub_ps(_mm_mul_ps(y, _mm_and_ps(y, SignCap.u.v)), y)), y); // Q * y + P * y * abs(y)
+
+}
+
+inline __m128 SIMDCosine( __m128 x4 )
+{
+	static const __m128 PIdivtwo = _mm_set_ps1(Pi * 0.5f);
+	static const __m128 PI4 = _mm_set_ps1(Pi);
+
+    x4 = _mm_add_ps( x4,  PIdivtwo);
+
+    x4 = _mm_sub_ps( x4, _mm_and_ps( _mm_cmpgt_ps( x4, PI4 ), _mm_mul_ps( _mm_set_ps1( 2.0f ), PI4 ) ) );
+
+    return SIMDSine( x4 );
+}
+
+inline __m128 SimdDoubleSafeSine( __m128 x4 )
+{
+	static const __m128 PI4 = _mm_set_ps1(Pi);
+	static const __m128 minPI4 = _mm_set_ps1(-1.0f * Pi);
+	static const __m128 twoPI4 = _mm_set_ps1(2.0f * Pi);
+
+    //Upper safe bound ( which is 2 * PI, anything above that is still unsafe )
+    __m128 mask1 = _mm_cmpgt_ps( x4, PI4 );
+
+    __m128 overPIx4 = _mm_and_ps( _mm_sub_ps( x4, twoPI4 ), mask1 );
+
+    __m128 mask2 = _mm_cmplt_ps( x4, PI4 );
+
+    __m128 underPIx4 = _mm_and_ps( x4, mask2 );
+
+    x4 = _mm_or_ps( underPIx4, overPIx4 );
+
+    //Lower safe bound ( which is -2*PI, anything lower than that is still unsafe )
+
+    mask1 = _mm_cmplt_ps( x4, minPI4 );
+
+    underPIx4 = _mm_and_ps( _mm_add_ps( x4, twoPI4 ), mask1 );
+
+    mask2 = _mm_cmpgt_ps( x4, minPI4 );
+
+    overPIx4 = _mm_and_ps( x4, mask2 );
+
+    x4 = _mm_or_ps( underPIx4, overPIx4 );
+
+    return SIMDSine( x4 );
+}
+
+
 #endif
 
 //===================================================================================
@@ -437,8 +500,6 @@ public:
 	friend inline VecN	SimdAnd( const VecN &lval, const VecN &rval )	{ return _mm_and_ps( lval.v, rval.v );	}
 	friend inline VecN	SimdOr ( const VecN &lval, const VecN &rval )	{ return _mm_or_ps( lval.v, rval.v );	}
 	friend inline VecN	SimdXor( const VecN &lval, const VecN &rval )	{ return _mm_xor_ps( lval.v, rval.v );	}
-
-
 
 
 	friend void SimdNormalize(VecN& nX, VecN& nY, VecN& nZ)
