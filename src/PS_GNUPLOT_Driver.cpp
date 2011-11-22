@@ -99,7 +99,7 @@ bool GNUPlotDriver::createGraph()
 */
 	char buffer[1024];
 
-	sprintf(buffer, "SELECT xpID, processTotal, ctThreads, ctSIMDLength FROM tblPerfLog WHERE xpID >= %d and xpID <= %d", m_idxStart, m_idxEnd);
+	sprintf(buffer, "SELECT xpID, processTime, ctThreads, ctSIMDLength FROM tblPerfLog WHERE xpID >= %d and xpID <= %d", m_idxStart, m_idxEnd);
 
 	rc = sqlite3_exec(db, buffer, sqlite_Callback, this, &lpSqlError);
 	if(rc != SQLITE_OK)
