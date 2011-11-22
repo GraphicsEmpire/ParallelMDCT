@@ -664,8 +664,8 @@ int main(int argc, char* argv[]) {
 			ApplyMDCT<double>(arrInputSignal, arrOutputSpectrum, ctFrames);
 
 			tbb::tick_count t1 = tbb::tick_count::now();
-			ms = (t1 - t0).seconds();
-			printf("[%u of %u] File %s processed in %.2f [ms] \n", iFile+1, g_appSettings.ctFilesToUse, vFiles[iFile].c_str(), ms * 1000.0);
+			ms = (t1 - t0).seconds() * 1000.0;
+			printf("[%u of %u] File %s processed in %.2f [ms] \n", iFile+1, g_appSettings.ctFilesToUse, vFiles[iFile].c_str(), ms);
 
 			if(g_appSettings.bDisplaySpectrums)
 			{
