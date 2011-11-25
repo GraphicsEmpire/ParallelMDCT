@@ -22,7 +22,7 @@ using namespace std;
 #include "PS_MDCT.h"
 #include "PS_DrawChart.h"
 #include "PS_GNUPLOT_Driver.h"
-
+#include "PS_Classifier.h"
 
 #ifdef WIN32
 	#include <io.h>
@@ -60,6 +60,8 @@ int ListFilesDir(std::vector<string>& vPaths, const char* chrPath, const char* c
 template<typename T>
 U32 ReadSoundFile(string strSoundFP, std::vector<T>& outputData, U32 windowSize = 1);
 
+int SaveCSV(string strFP, std::vector<double>& data);
+int SaveARFF(string strFP, std::vector<double>& zeros, std::vector<double>& centroid, std::vector<char>& truth);
 
 //Application Settings
 struct APPSETTINGS{
@@ -433,9 +435,138 @@ bool sqlite_InsertLogRecord(const char* lpStrSoundName, double processTimeMS,
 	return true;
 }
 
+void doQ1()
+{
+	std::vector<DAnsiStr> vFiles;
+	{
+		//Create a list of all files
+		using namespace PS;
+		using namespace PS::FILESTRINGUTILS;
+
+		DAnsiStr strInfPath = ChangeFileExt(GetExePath(), ".inf");
+		CSketchConfig* lpConfig = new PS::CSketchConfig(strInfPath, CSketchConfig::fmRead);
+
+		DAnsiStr strRoot = lpConfig->readString("GENERAL", "ROOTPATH");
+		DAnsiStr strExt  = lpConfig->readString("GENERAL", "FILEEXT");
+		//int ctGroups = lpConfig->readInt("GENERAL", "GROUPCOUNT");
+		DAnsiStr strFile;
+
+		strFile = strRoot + DAnsiStr("/classical/classical.00000.au");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("/classical/classical.00009.au");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("/disco/disco.00000.au");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("/disco/disco.00009.au");
+		vFiles.push_back(strFile);
+
+		SAFE_DELETE(lpConfig);
+	}
+
+	std::vector<double> centroids;
+	std::vector<double> zeros;
+	std::vector<char> groundTruth;
+
+	DAnsiStr strExeDir = ExtractFilePath(GetExePath());
+	for(int i=0; i<vFiles.size(); i++)
+	{
+		//
+		printf("Processing %s\n", vFiles[i].ptr());
+		getchar();
+
+		//Classifier::computeSpectralCentroid(vFiles[i].ptr(), centroids, 512);
+		//int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossings(vFiles[i].ptr(), centroids, zeros, 512);
+		int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossingsSmoothed(vFiles[i].ptr(), centroids, zeros, 512, 40);
+		//Classifier::sonifySpectralCentroid(centroids);
+
+
+		for(int j=0; j<ctTicks; j++)
+		{
+			if(i < 2)
+				groundTruth.push_back('c');
+			else
+				groundTruth.push_back('d');
+		}
+
+		/*
+		DAnsiStr strFP1 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv") + DAnsiStr("SmoothCent"));
+		SaveCSV(strFP1.c_str(), centroids);
+
+
+		DAnsiStr strFP2 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv")) + DAnsiStr("SmoothZeros");
+		SaveCSV(strFP2.c_str(), zeros);
+		centroids.resize(0);
+		zeros.resize(0);
+		*/
+
+	}
+
+	DAnsiStr strArff = ExtractFilePath(GetExePath()) + "genre_smooth.arff";
+	SaveARFF(strArff.ptr(), zeros, centroids, groundTruth);
+}
+
+int SaveARFF(string strFP, std::vector<double>& zeros, std::vector<double>& centroid, std::vector<char>& truth)
+{
+	char buffer[1024];
+
+	ofstream myfile;
+	myfile.open (strFP.c_str());
+
+	string strTemp;
+	myfile << "% ARFF exported by Pourya Shirazian."<< endl;
+	myfile << "@relation genre_classic_disco" << endl;
+	myfile << "@attribute \'cent\' real"<< endl;
+	myfile << "@attribute \'zero\' real"<< endl;
+	myfile << "@attribute \'class\' {classic, disco}"<< endl;
+	myfile << "@data"<< endl;
+
+	U32 ctFrames = centroid.size();
+	for(U32 i=0; i<ctFrames; i++)
+	{
+		if(truth[i] == 'c')
+			sprintf(buffer, "%.4f, %.4f, classic", centroid[i], zeros[i]);
+		else
+			sprintf(buffer, "%.4f, %.4f, disco", centroid[i], zeros[i]);
+
+		strTemp = string(buffer);
+		myfile << strTemp << endl;
+	}
+
+	myfile.close();
+	return 1;
+}
+
+int SaveCSV(string strFP, std::vector<double>& data)
+{
+	char buffer[1024];
+
+	ofstream myfile;
+	myfile.open (strFP.c_str());
+
+	string strTemp;
+	for(U32 i=0; i<data.size(); i++)
+	{
+		if(i < data.size() - 1)
+			sprintf(buffer, "%.4f, ", data[i]);
+		else
+			sprintf(buffer, "%.4f", data[i]);
+
+		strTemp = string(buffer);
+		myfile << strTemp;
+	}
+
+	myfile.close();
+	return 1;
+}
 
 //Main
+
 int main(int argc, char* argv[]) {
+
+	doQ1();
 	//Detect CPU Info
 	ProcessorInfo info;
 	{
@@ -460,6 +591,7 @@ int main(int argc, char* argv[]) {
 	g_appSettings.ctThreads = info.ctCores;
 	g_appSettings.ctThreadCountStart = info.ctCores;
 	g_appSettings.ctThreadCountEnd   = info.ctCores;
+
 
 	for(int i=0; i<argc; i++)
 	{
