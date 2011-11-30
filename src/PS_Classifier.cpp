@@ -6,6 +6,10 @@
  */
 
 #include "PS_Classifier.h"
+#include "AA_Models/PS_FileDirectory.h"
+#include "AA_Models/PS_SketchConfig.h"
+
+using namespace PS::FILESTRINGUTILS;
 
 
 int Classifier::computeSpectralCentroid(string strSoundFP, std::vector<double>& outputData, int windowSize)
@@ -369,3 +373,113 @@ void Classifier::classifyEmperically(std::vector<double>& zeros,
 	printf("Disco Correct: %d, Error:%d, ErrorRate:%.2f \n", ctGroupTotal - ctErrorDisco, ctErrorDisco, fErrorRateDisco);
 	printf("Classic Correct: %d, Error:%d, ErrorRate:%.2f \n", ctGroupTotal - ctErrorClassic, ctErrorClassic, fErrorRateClassic);
 }
+
+
+void Classifier::run()
+{
+	std::vector<DAnsiStr> vFiles;
+	{
+		//Create a list of all files
+		using namespace PS;
+		using namespace PS::FILESTRINGUTILS;
+
+		DAnsiStr strInfPath = ChangeFileExt(GetExePath(), ".inf");
+		CSketchConfig* lpConfig = new PS::CSketchConfig(strInfPath, CSketchConfig::fmRead);
+
+		DAnsiStr strRoot = lpConfig->readString("GENERAL", "ROOTPATH");
+		DAnsiStr strExt  = lpConfig->readString("GENERAL", "FILEEXT");
+		//int ctGroups = lpConfig->readInt("GENERAL", "GROUPCOUNT");
+		DAnsiStr strFile;
+
+		strFile = strRoot + DAnsiStr("Classic_Mozart_Eine Kleine Nachtmusik.wav");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("Classic_Mozart_Piano Sonata in B-flat.wav");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("Disco_EnriqueIglesiasJudyDenBroeder_TakingBackMyLove.wav");
+		vFiles.push_back(strFile);
+
+		strFile = strRoot + DAnsiStr("Disco_Inna_love.wav");
+		vFiles.push_back(strFile);
+
+		SAFE_DELETE(lpConfig);
+	}
+
+	std::vector<double> centroids;
+	std::vector<double> zeros;
+	std::vector<char> groundTruth;
+
+	DAnsiStr strExeDir = ExtractFilePath(GetExePath());
+	for(int i=0; i<vFiles.size(); i++)
+	{
+		//
+		printf("Processing %s\n", vFiles[i].ptr());
+		getchar();
+
+		//Classifier::computeSpectralCentroid(vFiles[i].ptr(), centroids, 512);
+		//int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossings(vFiles[i].ptr(), centroids, zeros, 512);
+		int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossingsSmoothed(vFiles[i].ptr(), centroids, zeros, 512, 40);
+		//Classifier::sonifySpectralCentroid(centroids);
+
+
+		for(int j=0; j<ctTicks; j++)
+		{
+			if(i < 2)
+				groundTruth.push_back('c');
+			else
+				groundTruth.push_back('d');
+		}
+
+		/*
+		DAnsiStr strFP1 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv") + DAnsiStr("SmoothCent"));
+		SaveCSV(strFP1.c_str(), centroids);
+
+
+		DAnsiStr strFP2 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv")) + DAnsiStr("SmoothZeros");
+		SaveCSV(strFP2.c_str(), zeros);
+		centroids.resize(0);
+		zeros.resize(0);
+		*/
+
+	}
+
+	Classifier::classifyEmperically(zeros, centroids, groundTruth);
+	DAnsiStr strArff = ExtractFilePath(GetExePath()) + "genre_smooth.arff";
+	SaveARFF(strArff.ptr(), zeros, centroids, groundTruth);
+}
+
+int Classifier::SaveARFF(string strFP,
+						 std::vector<double>& zeros,
+						 std::vector<double>& centroid,
+						 std::vector<char>& truth)
+{
+	char buffer[1024];
+
+	ofstream myfile;
+	myfile.open (strFP.c_str());
+
+	string strTemp;
+	myfile << "% ARFF exported by Pourya Shirazian."<< endl;
+	myfile << "@relation genre_classic_disco" << endl;
+	myfile << "@attribute \'cent\' real"<< endl;
+	myfile << "@attribute \'zero\' real"<< endl;
+	myfile << "@attribute \'class\' {classic, disco}"<< endl;
+	myfile << "@data"<< endl;
+
+	U32 ctFrames = centroid.size();
+	for(U32 i=0; i<ctFrames; i++)
+	{
+		if(truth[i] == 'c')
+			sprintf(buffer, "%.4f, %.4f, classic", centroid[i], zeros[i]);
+		else
+			sprintf(buffer, "%.4f, %.4f, disco", centroid[i], zeros[i]);
+
+		strTemp = string(buffer);
+		myfile << strTemp << endl;
+	}
+
+	myfile.close();
+	return 1;
+}
+

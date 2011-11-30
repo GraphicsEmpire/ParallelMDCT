@@ -40,12 +40,25 @@ public:
 									std::vector<double>& zeros);
 
 	//Q4
-	void classifyEmperically(std::vector<double>& zeros,
+	static void classifyEmperically(std::vector<double>& zeros,
 							 std::vector<double>& centroids,
 							 std::vector<char>& groundTruth);
 
+	/*!
+	 * Saves to Weka ARFF format for classification.
+	 */
+	static int SaveARFF(string strFP,
+						std::vector<double>& zeros,
+						std::vector<double>& centroid,
+						std::vector<char>& truth);
 
+
+	static void run();
 
 };
+
+
+
+
 
 #endif /* PS_CLASSIFIER_H_ */

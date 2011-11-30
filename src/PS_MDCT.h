@@ -14,6 +14,8 @@
 #include "tbb/enumerable_thread_specific.h"
 #include <vector>
 
+
+
 using namespace tbb;
 using namespace std;
 
@@ -35,6 +37,43 @@ typedef SOAFRAMECHUNKS<float, FRAME_DATA_COUNT, 1> CHUNKS1F;
 typedef SOAFRAMECHUNKS<float, FRAME_DATA_COUNT, 8> CHUNKS8F;
 
 
+template<typename T>
+class PrepareChunksBody
+{
+public:
+	typedef SOAFRAMECHUNKS<T, FRAME_DATA_COUNT,1> CHUNKS1;
+
+private:
+	U32 m_szInputData;
+	const T* m_lpInputData;
+
+	U32 m_ctChunks;
+	CHUNKS1* m_lpOutputChunks;
+
+public:
+	PrepareChunksBody(U32 szInput, const T* lpInput, U32 ctChunks, CHUNKS1* lpOutputChunks)
+	{
+		m_szInputData = szInput;
+		m_lpInputData = lpInput;
+
+		m_ctChunks = ctChunks;
+		m_lpOutputChunks = lpOutputChunks;
+	}
+
+	void operator()(const blocked_range<size_t>& range) const
+	{
+		U32 szCopy;
+		for(size_t i=range.begin(); i != range.end(); i++)
+		{
+			if(i < m_ctChunks)
+				szCopy = FRAME_DATA_COUNT;
+			else
+				szCopy = m_szInputData - FRAME_DATA_COUNT * (m_ctChunks - 1);
+			memcpy(m_lpOutputChunks[i].data, &m_lpInputData[i*FRAME_DATA_COUNT], szCopy * sizeof(T));
+		}
+	}
+};
+
 //Computes Modified Discrete Cosine Transform using multi-core and
 //SIMD technique
 template<typename T>
@@ -50,21 +89,23 @@ private:
 	T* m_lpSpectrum;
 	U32 m_szSpectrum;
 	U32 m_ctChunks;
+	bool m_bUseSimd;
 
 public:
-	CMDCTComputer(CHUNKS1* lpChunksOdd, CHUNKS1* lpChunksEven, T* lpSpectrum, U32 szSpectrum, U32 ctChunks)
+	CMDCTComputer(CHUNKS1* lpChunksOdd, CHUNKS1* lpChunksEven, T* lpSpectrum, U32 szSpectrum, U32 ctChunks, bool bUseSimd)
 	{
 		m_lpChunksOdd  = lpChunksOdd;
 		m_lpChunksEven = lpChunksEven;
 		m_lpSpectrum   = lpSpectrum;
 		m_ctChunks 	   = ctChunks;
 		m_szSpectrum   = szSpectrum;
+
+		m_bUseSimd = bUseSimd;
 	}
 
 	void operator()(const blocked_range<size_t>& range) const
 	{
 		///CounterProcessedFrames::reference localCounter = g_ctTotalFrames.local();
-
 		for(size_t i=range.begin(); i != range.end(); i++)
 		{
 			process(m_lpChunksOdd[i], m_lpChunksEven[i], i, i != m_ctChunks - 1);
@@ -73,8 +114,19 @@ public:
 	}
 
 	void process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, int iChunk, bool bComputeEven) const;
-	void commonKernel(const T* lpInput, T* lpOutput) const;
+
 };
+
+/*!
+ * Common Kernel Function to compute MDCT for one frame only
+ */
+void CommonKernel(const void* lpInput, void* lpOutput);
+
+/*!
+ * Cosine test
+ */
+void CosineTest();
+
 
 /*
 void PrintThreadWorkHistory(int ctAttempts = 1)
@@ -94,100 +146,58 @@ template<typename T>
 void CMDCTComputer<T>::process(const CHUNKS1& inputOdd, const CHUNKS1& inputEven, int iChunk, bool bComputeEven) const
 {
 	U32 hn = FRAME_DATA_COUNT / 2;
-	T d;
 
-	T piOver2N = Pi / (T)(2 * FRAME_DATA_COUNT);
-
-	T *pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT];
-	//T *pd = &output.data[0];
-
-	//ODD
-	for(U32 k=0; k<hn; k++)
+	//Use SIMD Kernel
+	if(m_bUseSimd)
 	{
-		d = 0.0;
-		for(U32 m=0; m<FRAME_DATA_COUNT; m++)
-		{
-			d += inputOdd.data[m] * cos(piOver2N * (2.0 * k + 1) * (2.0 * m + 1 + hn));
-		}
-		pd[k] = d;
+		CommonKernel(inputOdd.data, &m_lpSpectrum[iChunk * FRAME_DATA_COUNT]);
+		if(bComputeEven)
+			CommonKernel(inputEven.data, &m_lpSpectrum[iChunk * FRAME_DATA_COUNT + hn]);
 	}
-
-	//EVEN
-	if(bComputeEven)
+	else
 	{
-		pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT + hn];
-		//pd = &output.data[hn];
+		T d;
+		T piOver2N = Pi / (T)(2 * FRAME_DATA_COUNT);
+		T *pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT];
+
+		//ODD
 		for(U32 k=0; k<hn; k++)
 		{
 			d = 0.0;
 			for(U32 m=0; m<FRAME_DATA_COUNT; m++)
 			{
-				d += inputEven.data[m] * cos(piOver2N * (2.0 * k + 1) * (2.0 * m + 1 + hn));
+				d += inputOdd.data[m] * cos(piOver2N * (2.0 * k + 1) * (2.0 * m + 1 + hn));
 			}
 			pd[k] = d;
 		}
-	}
 
-/*
-	commonKernel(inputOdd.data, &output.data[0]);
-	if(bComputeEven)
-		commonKernel(inputEven.data, &output.data[FRAME_DATA_COUNT / 2]);
-		*/
-
-}
-
-template<typename T>
-void CMDCTComputer<T>::commonKernel(const T* lpInput, T* lpOutput) const
-{
-	U32 hn = FRAME_DATA_COUNT / 2;
-	U32 mMax = PS_SIMD_BLOCKS(FRAME_DATA_COUNT);
-	T* pd = lpOutput;
-
-	Float_ dd(0.0f);
-	Float_ PIOVER2N(Pi / (T)(2 * FRAME_DATA_COUNT));
-
-	Float_ ii(PS_SIMD_FLEN);
-	Float_ two(2.0f);
-	Float_ Ndiv2PlusOne(hn + 1.0f);
-
-	float PS_SIMD_ALIGN(arrM[PS_SIMD_FLEN]);
-	for(int iSimd=0; iSimd<PS_SIMD_FLEN; iSimd++)
-		arrM[iSimd] = iSimd;
-	Float_ mm(arrM);
-
-	//ODD
-	for(U32 k=0; k<hn; k++)
-	{
-		dd.setZero();
-
-		Float_ ss = PIOVER2N * Float_(2.0f * k + 1);
-		for(U32 m=0; m<mMax; m++)
+		//EVEN
+		if(bComputeEven)
 		{
-			Float_ xm(&lpInput[m * PS_SIMD_FLEN]);
-			Float_ angle = ss * (two * mm + Ndiv2PlusOne);
-
-#ifdef SIMD_USE_M128
-			dd = dd + xm * SIMDCosine(angle.v);
-			mm = mm + ii;
-#else
-
-#endif
+			pd = &m_lpSpectrum[iChunk * FRAME_DATA_COUNT + hn];
+			//pd = &output.data[hn];
+			for(U32 k=0; k<hn; k++)
+			{
+				d = 0.0;
+				for(U32 m=0; m<FRAME_DATA_COUNT; m++)
+				{
+					d += inputEven.data[m] * cos(piOver2N * (2.0 * k + 1) * (2.0 * m + 1 + hn));
+				}
+				pd[k] = d;
+			}
 		}
-
-		float d = 0.0f;
-		for(int i=0; i<PS_SIMD_FLEN; i++)
-			d += dd[i];
-		pd[k] = d;
 	}
 }
 
+
+/*!
+ * Performs Modified Discrete Cosine Transform in Parallel
+ */
 template<typename T>
-bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput, int& ctFrames)
+U32 ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput, bool bUseSimd, bool bCopyParallel)
 {
 	U32 szData = arrSignalData.size();
-	ctFrames = szData / FRAME_DATA_COUNT;
-
-	U32 ctChunks   = ctFrames;
+	U32 ctChunks = szData / FRAME_DATA_COUNT;
 	U32 szSpectrum = FRAME_DATA_COUNT*ctChunks;
 
 	//Setup Input Chunkss
@@ -196,35 +206,48 @@ bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput, i
 	CHUNKS1 *lpChunksEven = reinterpret_cast<CHUNKS1*>(AllocAligned(sizeof(CHUNKS1) * ctChunks));
 	T* lpSpectrum = reinterpret_cast<T*>(AllocAligned(sizeof(T) * szSpectrum));
 
-
-	//Odd
-	const T* lpSourceBegin = &arrSignalData[0];
-	U32 szCopy;
-	for(U32 i=0; i<ctChunks; i++)
+	if(bCopyParallel)
 	{
-		if(szData > FRAME_DATA_COUNT)
-			szCopy = FRAME_DATA_COUNT;
-		else
-			szCopy = szData;
-		memcpy(lpChunksOdd[i].data, &lpSourceBegin[i*FRAME_DATA_COUNT], szCopy * sizeof(T));
-		szData -= szCopy;
+		//ODD
+		PrepareChunksBody<T> prepareBodyOdd(szData, &arrSignalData[0], ctChunks, lpChunksOdd);
+		tbb::parallel_for(blocked_range<size_t>(0, ctChunks), prepareBodyOdd, tbb::auto_partitioner());
+
+		//EVEN
+		PrepareChunksBody<T> prepareBodyEven(szData - FRAME_DATA_COUNT/2, &arrSignalData[FRAME_DATA_COUNT/2], ctChunks, lpChunksEven);
+		tbb::parallel_for(blocked_range<size_t>(0, ctChunks), prepareBodyEven, tbb::auto_partitioner());
+	}
+	else
+	{
+		//Odd
+		const T* lpSourceBegin = &arrSignalData[0];
+		U32 szCopy;
+		for(U32 i=0; i<ctChunks; i++)
+		{
+			if(szData > FRAME_DATA_COUNT)
+				szCopy = FRAME_DATA_COUNT;
+			else
+				szCopy = szData;
+			memcpy(lpChunksOdd[i].data, &lpSourceBegin[i*FRAME_DATA_COUNT], szCopy * sizeof(T));
+			szData -= szCopy;
+		}
+
+		//Even
+		szData = arrSignalData.size() - FRAME_DATA_COUNT / 2;
+		lpSourceBegin = &arrSignalData[FRAME_DATA_COUNT / 2];
+		for(U32 i=0; i<ctChunks; i++)
+		{
+			if(szData > FRAME_DATA_COUNT)
+				szCopy = FRAME_DATA_COUNT;
+			else
+				szCopy = szData;
+			memcpy(lpChunksEven[i].data, &lpSourceBegin[i*FRAME_DATA_COUNT], szCopy * sizeof(T));
+			szData -= szCopy;
+		}
 	}
 
-	//Even
-	szData = arrSignalData.size() - FRAME_DATA_COUNT / 2;
-	lpSourceBegin = &arrSignalData[FRAME_DATA_COUNT / 2];
-	for(U32 i=0; i<ctChunks; i++)
-	{
-		if(szData > FRAME_DATA_COUNT)
-			szCopy = FRAME_DATA_COUNT;
-		else
-			szCopy = szData;
-		memcpy(lpChunksEven[i].data, &lpSourceBegin[i*FRAME_DATA_COUNT], szCopy * sizeof(T));
-		szData -= szCopy;
-	}
 
 	//Run Parallel MDCT algorithm to compute
-	CMDCTComputer<T> body(lpChunksOdd, lpChunksEven, lpSpectrum, szSpectrum, ctChunks);
+	CMDCTComputer<T> body(lpChunksOdd, lpChunksEven, lpSpectrum, szSpectrum, ctChunks, bUseSimd);
 	tbb::parallel_for(blocked_range<size_t>(0, ctChunks), body, tbb::auto_partitioner());
 
 	FreeAligned(lpChunksOdd);
@@ -235,7 +258,7 @@ bool ApplyMDCT(const std::vector<T>& arrSignalData, std::vector<T>& arrOutput, i
 
 	FreeAligned(lpSpectrum);
 
-	return true;
+	return ctChunks;
 }
 
 
@@ -276,7 +299,8 @@ void NormalizeData(std::vector<T>& arrData)
 }
 
 
-
+U32 CountSamples(string strSoundFP);
+U32 ReadSoundFile(string strSoundFP, std::vector<float>& outputData, U32 windowSize = 1);
 
 
 

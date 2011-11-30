@@ -20,6 +20,8 @@ using namespace std;
 
 #include "PS_CPU_INFO.h"
 #include "PS_MDCT.h"
+#include "PS_JobDispatcher.h"
+
 #include "PS_DrawChart.h"
 #include "PS_GNUPLOT_Driver.h"
 #include "PS_Classifier.h"
@@ -56,12 +58,14 @@ void MouseMove(int x, int y);
 
 //App Functions
 int ListFilesDir(std::vector<string>& vPaths, const char* chrPath, const char* chrExt, bool bDirOnly);
+U32 CountSamples(string strSoundFP);
 
 template<typename T>
 U32 ReadSoundFile(string strSoundFP, std::vector<T>& outputData, U32 windowSize = 1);
 
-int SaveCSV(string strFP, std::vector<double>& data);
-int SaveARFF(string strFP, std::vector<double>& zeros, std::vector<double>& centroid, std::vector<char>& truth);
+template<typename T>
+int SaveCSV(string strFP, std::vector<T>& data);
+
 
 //Application Settings
 struct APPSETTINGS{
@@ -70,6 +74,9 @@ struct APPSETTINGS{
 	int ctThreads;
 	int ctFilesToUse;
 
+	bool bProcessBatchInParallel;
+	bool bUseSIMD;
+	bool bCopyParallel;
 	bool bDisplaySpectrums;
 	bool bRoot;
 	bool bPrintPlot;
@@ -100,7 +107,7 @@ void Display()
 		//glPushMatrix()
 		U32 ctSeries = g_lpDrawChart->countSeries();
 		float dd = 1.0f / (float)ctSeries;
-		for(int i=0; i<ctSeries; i++)
+		for(U32 i=0; i<ctSeries; i++)
 		{
 			glPushMatrix();
 			glTranslatef(0.0f, i * dd, i * dd);
@@ -175,58 +182,69 @@ void sfPlay(string strSoundFP)
 	}
 }
 
+
 template<typename T>
-U32 ReadSoundFile(string strSoundFP, std::vector<T>& outputData, U32 windowSize = 1)
+int SaveBinary(string strFP, const std::vector<T>& data)
 {
-	MarSystemManager mng;
+	char buffer[1024];
 
-	// A series to contain everything
-	MarSystem* net = mng.create("Series", "net");
+	ofstream myfile;
+	myfile.open (strFP.c_str());
 
-	// The sound file
-	net->addMarSystem(mng.create("SoundFileSource", "src"));
-
-	//Set input filename
-	net->updControl("SoundFileSource/src/mrs_string/filename", strSoundFP);
-
-	//Set offset from the beginning of the song
-	net->updControl("SoundFileSource/src/mrs_natural/pos", 0);
-
-	//Window size
-	net->setctrl("mrs_natural/inSamples", windowSize);
-
-	mrs_natural channels = net->getctrl("mrs_natural/onObservations")->to<mrs_natural>();
-
-	//cout << "channels=" << channels << endl;
-
-	realvec processedData;
-
-	//Get Data Chunks and perform MDCT
-	U32 ctTicks = 0;
-
-	outputData.reserve(512 * 1024);
-
-	//Temp Array
-	std::vector<T> arrTemp;
-	arrTemp.resize(512);
-	while (net->getctrl("SoundFileSource/src/mrs_bool/hasData")->to<mrs_bool>())
+	//Write number of samples
+	myfile << data.size();
+	for(U32 i=0; i<data.size(); i++)
 	{
-		ctTicks++;
-		net->tick();
-		processedData = net->getctrl("mrs_realvec/processedData")->to<mrs_realvec>();
-
-		U32 szData = processedData.getSize();
-		memcpy(&arrTemp[0], processedData.getData(), szData * sizeof(T));
-
-		//Copy to output
-		outputData.insert(outputData.end(), arrTemp.begin(), arrTemp.end());
+		myfile << data[i];
 	}
 
-	arrTemp.resize(0);
-	delete net;
-
-	return ctTicks;
+	myfile.close();
+	return 1;
 }
+
+template<typename T>
+int LoadBinary(string strFP, std::vector<T>& data)
+{
+	ifstream myfile;
+	myfile.open (strFP.c_str());
+
+	U32 ctSamples = 0;
+	myfile >> ctSamples;
+
+	data.resize(ctSamples);
+	myfile.read((char *)data.data(), sizeof(T) * ctSamples);
+	myfile.close();
+	return 1;
+}
+
+
+/*!
+ * Save data array in CSV format
+ */
+template<typename T>
+int SaveCSV(string strFP, std::vector<T>& data)
+{
+	char buffer[1024];
+
+	ofstream myfile;
+	myfile.open (strFP.c_str());
+
+	string strTemp;
+	for(U32 i=0; i<data.size(); i++)
+	{
+		if(i < data.size() - 1)
+			sprintf(buffer, "%.4f, ", data[i]);
+		else
+			sprintf(buffer, "%.4f", data[i]);
+
+		strTemp = string(buffer);
+		myfile << strTemp;
+	}
+
+	myfile.close();
+	return 1;
+}
+
 
 int ListFilesDir(std::vector<string>& vPaths, const char* chrPath, const char* chrExt, bool bDirOnly)
 {
@@ -336,7 +354,7 @@ bool sqlite_CreateTableIfNotExist()
 	return true;
 }
 
-bool sqlite_InsertLogRecord(const char* lpStrSoundName, double processTimeMS,
+bool sqlite_InsertLogRecord(const char* lpStrSoundName, double processTimeMS, U8 ctSIMDLength,
 							U32 ctSamples, U32 ctFrames, U32 ctFramesPerChunk,
 							U32 ctThreads, U32 szWorkMem, U32 szTotalMem, U32 szLLC)
 {
@@ -407,7 +425,7 @@ bool sqlite_InsertLogRecord(const char* lpStrSoundName, double processTimeMS,
 	sqlite3_bind_int(statement, idxParam, ctThreads);
 
 	idxParam = sqlite3_bind_parameter_index(statement, "@ct_simd_length");
-	sqlite3_bind_int(statement, idxParam, PS_SIMD_FLEN);
+	sqlite3_bind_int(statement, idxParam, ctSIMDLength);
 
 	idxParam = sqlite3_bind_parameter_index(statement, "@sz_work_item_mem");
 	sqlite3_bind_int(statement, idxParam, szWorkMem);
@@ -435,159 +453,21 @@ bool sqlite_InsertLogRecord(const char* lpStrSoundName, double processTimeMS,
 	return true;
 }
 
-void doQ1()
-{
-	std::vector<DAnsiStr> vFiles;
-	{
-		//Create a list of all files
-		using namespace PS;
-		using namespace PS::FILESTRINGUTILS;
-
-		DAnsiStr strInfPath = ChangeFileExt(GetExePath(), ".inf");
-		CSketchConfig* lpConfig = new PS::CSketchConfig(strInfPath, CSketchConfig::fmRead);
-
-		DAnsiStr strRoot = lpConfig->readString("GENERAL", "ROOTPATH");
-		DAnsiStr strExt  = lpConfig->readString("GENERAL", "FILEEXT");
-		//int ctGroups = lpConfig->readInt("GENERAL", "GROUPCOUNT");
-		DAnsiStr strFile;
-
-		strFile = strRoot + DAnsiStr("/classical/classical.00000.au");
-		vFiles.push_back(strFile);
-
-		strFile = strRoot + DAnsiStr("/classical/classical.00009.au");
-		vFiles.push_back(strFile);
-
-		strFile = strRoot + DAnsiStr("/disco/disco.00000.au");
-		vFiles.push_back(strFile);
-
-		strFile = strRoot + DAnsiStr("/disco/disco.00009.au");
-		vFiles.push_back(strFile);
-
-		SAFE_DELETE(lpConfig);
-	}
-
-	std::vector<double> centroids;
-	std::vector<double> zeros;
-	std::vector<char> groundTruth;
-
-	DAnsiStr strExeDir = ExtractFilePath(GetExePath());
-	for(int i=0; i<vFiles.size(); i++)
-	{
-		//
-		printf("Processing %s\n", vFiles[i].ptr());
-		getchar();
-
-		//Classifier::computeSpectralCentroid(vFiles[i].ptr(), centroids, 512);
-		//int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossings(vFiles[i].ptr(), centroids, zeros, 512);
-		int ctTicks = Classifier::computeSpectralCentroidWithZeroCrossingsSmoothed(vFiles[i].ptr(), centroids, zeros, 512, 40);
-		//Classifier::sonifySpectralCentroid(centroids);
-
-
-		for(int j=0; j<ctTicks; j++)
-		{
-			if(i < 2)
-				groundTruth.push_back('c');
-			else
-				groundTruth.push_back('d');
-		}
-
-		/*
-		DAnsiStr strFP1 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv") + DAnsiStr("SmoothCent"));
-		SaveCSV(strFP1.c_str(), centroids);
-
-
-		DAnsiStr strFP2 = strExeDir + ChangeFileExt(ExtractFileName(vFiles[i]), DAnsiStr(".csv")) + DAnsiStr("SmoothZeros");
-		SaveCSV(strFP2.c_str(), zeros);
-		centroids.resize(0);
-		zeros.resize(0);
-		*/
-
-	}
-
-	DAnsiStr strArff = ExtractFilePath(GetExePath()) + "genre_smooth.arff";
-	SaveARFF(strArff.ptr(), zeros, centroids, groundTruth);
-}
-
-int SaveARFF(string strFP, std::vector<double>& zeros, std::vector<double>& centroid, std::vector<char>& truth)
-{
-	char buffer[1024];
-
-	ofstream myfile;
-	myfile.open (strFP.c_str());
-
-	string strTemp;
-	myfile << "% ARFF exported by Pourya Shirazian."<< endl;
-	myfile << "@relation genre_classic_disco" << endl;
-	myfile << "@attribute \'cent\' real"<< endl;
-	myfile << "@attribute \'zero\' real"<< endl;
-	myfile << "@attribute \'class\' {classic, disco}"<< endl;
-	myfile << "@data"<< endl;
-
-	U32 ctFrames = centroid.size();
-	for(U32 i=0; i<ctFrames; i++)
-	{
-		if(truth[i] == 'c')
-			sprintf(buffer, "%.4f, %.4f, classic", centroid[i], zeros[i]);
-		else
-			sprintf(buffer, "%.4f, %.4f, disco", centroid[i], zeros[i]);
-
-		strTemp = string(buffer);
-		myfile << strTemp << endl;
-	}
-
-	myfile.close();
-	return 1;
-}
-
-int SaveCSV(string strFP, std::vector<double>& data)
-{
-	char buffer[1024];
-
-	ofstream myfile;
-	myfile.open (strFP.c_str());
-
-	string strTemp;
-	for(U32 i=0; i<data.size(); i++)
-	{
-		if(i < data.size() - 1)
-			sprintf(buffer, "%.4f, ", data[i]);
-		else
-			sprintf(buffer, "%.4f", data[i]);
-
-		strTemp = string(buffer);
-		myfile << strTemp;
-	}
-
-	myfile.close();
-	return 1;
-}
 
 //Main
-
-int main(int argc, char* argv[]) {
-
-	doQ1();
+int main(int argc, char* argv[])
+{
 	//Detect CPU Info
 	ProcessorInfo info;
-	{
-		info.bSupportAVX 	  = SimdDetectFeature(AVXFlag);
-		info.ctCores 		  = tbb::task_scheduler_init::default_num_threads();
-		info.simd_float_lines = PS_SIMD_FLEN;
-		info.cache_line_size  = GetCacheLineSize();
-
-		for(int i=0; i<4; i++)
-		{
-			info.cache_sizes[i]  = GetCacheSize(i, false);
-			info.cache_levels[i] = GetCacheLevel(i);
-			info.cache_types[i]  = GetCacheType(i);
-		}
-	}
 
 	memset(&g_appSettings, 0, sizeof(APPSETTINGS));
 	g_appSettings.ctFilesToUse = 1;
 	g_appSettings.bDisplaySpectrums = false;
 	g_appSettings.bRoot     = true;
 	g_appSettings.bPrintPlot = false;
+	g_appSettings.bProcessBatchInParallel = false;
+	g_appSettings.bUseSIMD   = true;
+	g_appSettings.bCopyParallel = true;
 	g_appSettings.ctThreads = info.ctCores;
 	g_appSettings.ctThreadCountStart = info.ctCores;
 	g_appSettings.ctThreadCountEnd   = info.ctCores;
@@ -603,6 +483,7 @@ int main(int argc, char* argv[]) {
 			g_appSettings.attempts = atoi(argv[i+1]);
 		}
 		*/
+
 
 		if(std::strcmp(strArg.c_str(), "-f") == 0)
 		{
@@ -640,6 +521,31 @@ int main(int argc, char* argv[]) {
 			g_appSettings.ctThreads = g_appSettings.ctThreadCountStart;
 		}
 
+		if(std::strcmp(strArg.c_str(), "-s") == 0)
+		{
+			if(atoi(argv[i+1]) != 0)
+				g_appSettings.bUseSIMD = true;
+			else
+				g_appSettings.bUseSIMD = false;
+		}
+
+		if(std::strcmp(strArg.c_str(), "-c") == 0)
+		{
+			if(atoi(argv[i+1]) != 0)
+				g_appSettings.bCopyParallel = true;
+			else
+				g_appSettings.bCopyParallel = false;
+		}
+
+		if(std::strcmp(strArg.c_str(), "-b") == 0)
+		{
+			if(atoi(argv[i+1]) != 0)
+				g_appSettings.bProcessBatchInParallel = true;
+			else
+				g_appSettings.bProcessBatchInParallel = false;
+		}
+
+
 		if(std::strcmp(strArg.c_str(), "-h") == 0)
 		{
 			printf("Usage: ParsipCmd -t [threads_count] -i -a [attempts] -c [cell_size] -f [model_file_path]\n");
@@ -647,6 +553,9 @@ int main(int argc, char* argv[]) {
 			printf("-f \t [FileCount] Number of audio files to use for this experiment.\n");
 			printf("-r \t Path is root.\n");
 			printf("-i \t Display spectrums.\n");
+			printf("-b \t [0/1] Turn on and off Batch in Parallel.\n");
+			printf("-c \t [0/1] Turn on and off Copy in Parallel.\n");
+			printf("-s \t [0/1] Turn on and off SIMD.\n");
 			printf("-p \t [Start - End] Plot performance graph using db values in range.\n");
 			printf("-t \t [threads count] Threads count.\n");
 			printf("-x \t [Start - End] Threads count interval.\n");
@@ -657,7 +566,7 @@ int main(int argc, char* argv[]) {
 
 	printf("Parallel MDCT Feature Extraction for MIR - Pourya Shirazian [Use -h for usage.]\n");
 	printf("**********************************************************************************\n");
-	if(SimdDetectFeature(OSXSAVEFlag))
+	if(info.bOSSupportAVX)
 		printf("OS supports AVX\n");
 	else
 		printf("OS DOESNOT support AVX\n");
@@ -670,13 +579,13 @@ int main(int argc, char* argv[]) {
 
 	printf("Running Machine: CoresCount:%u, SIMD FLOATS:%u\n", info.ctCores, info.simd_float_lines);
 	printf("CacheLine:%u [B]\n", info.cache_line_size);
-	for(int i=0; i<4; i++)
+	for(int i=0; i<info.ctCacheInfo; i++)
 	{
-		if(info.cache_types[i] != ctNone)
+		if(info.cache_types[i] != ProcessorInfo::ctNone)
 		{
 			printf("\tLevel:%d, Type:%s, Size:%u [KB]\n",
 					info.cache_levels[i],
-					GetCacheTypeString(info.cache_types[i]),
+					ProcessorInfo::GetCacheTypeString(info.cache_types[i]),
 					info.cache_sizes[i] / 1024);
 		}
 	}
@@ -743,9 +652,9 @@ int main(int argc, char* argv[]) {
 
 	U32 szWorkMem = 3 * sizeof(CMDCTComputer<double>::CHUNKS1);
 	U32 szLLC = 0;
-	for(int i=3; i >= 0; i--)
+	for(int i=info.ctCacheInfo; i >= 0; i--)
 	{
-		if(info.cache_types[i] != ctNone)
+		if(info.cache_types[i] != ProcessorInfo::ctNone)
 		{
 			szLLC = info.cache_sizes[i];
 			if(szLLC > 0) break;
@@ -769,63 +678,107 @@ int main(int argc, char* argv[]) {
 
 
 	//iterate over threads
+	//g_appSettings.ctThreadCountStart = g_appSettings.ctThreadCountEnd = 1;
 	for(int iThread = g_appSettings.ctThreadCountStart; iThread  <= g_appSettings.ctThreadCountEnd; iThread++)
 	{
 		SAFE_DELETE(g_lpTaskSchedular);
 		g_appSettings.ctThreads = iThread;
 		g_lpTaskSchedular = new tbb::task_scheduler_init(g_appSettings.ctThreads);
 		printf("**********************************************************************\n");
-		printf("Parallel MDCT - Initialized with %d threads. \n", g_appSettings.ctThreads);
+		printf("Parallel MDCT - Initialized with %d threads. Simd is %d. Parallel Copy is %d. Parallel Batch is %d\n",
+				g_appSettings.ctThreads, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel, g_appSettings.bProcessBatchInParallel);
 
-		double ms;
-		int ctFrames = 0;
 
-		//For all files
-		for(U32 iFile =0; iFile<(U32)g_appSettings.ctFilesToUse; iFile++)
+		if(g_appSettings.bProcessBatchInParallel)
 		{
-			//Arrays to hold values
-			std::vector<double> arrInputSignal;
-			std::vector<double> arrOutputSpectrum;
-
+			//ProcessBatched(const std::vector<string>& vFiles, bool bUseSimd, bool bCopyParallel)
 			tbb::tick_count t0 = tbb::tick_count::now();
 
-			//1. Read Sound Files
-			ReadSoundFile<double>(vFiles[iFile], arrInputSignal, 1);
-
-			//2. Apply MDCT
-			ApplyMDCT<double>(arrInputSignal, arrOutputSpectrum, ctFrames);
+			U32 ctFiles = MATHMIN(g_appSettings.ctFilesToUse, vFiles.size());
+			ProcessBatched body(vFiles, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel);
+			tbb::parallel_for(blocked_range<size_t>(0, ctFiles), body, tbb::auto_partitioner());
 
 			tbb::tick_count t1 = tbb::tick_count::now();
-			ms = (t1 - t0).seconds() * 1000.0;
-			printf("[%u of %u] File %s processed in %.2f [ms] \n", iFile+1, g_appSettings.ctFilesToUse, vFiles[iFile].c_str(), ms);
-
-			if(g_appSettings.bDisplaySpectrums)
-			{
-				//3. Normalized Output
-				NormalizeData<double>(arrOutputSpectrum);
-				//arrOutputSpectrum.resize(100);
-
-				vec3f c;
-				c.x = RandRangeT<float>(0.0f, 1.0f);
-				c.y = RandRangeT<float>(0.0f, 1.0f);
-				c.z = RandRangeT<float>(0.0f, 1.0f);
-				g_lpDrawChart->addSeries(arrOutputSpectrum, "Spectrum", 1.0f, vec2f(0.0, 1.5f), c);
-			}
+			double ms = (t1 - t0).seconds() * 1000.0;
+			printf("[%u of %u] Files are processed in %.2f [ms].\n", g_appSettings.ctFilesToUse, vFiles.size(), ms);
 
 			//Log
 			{
-				DAnsiStr strFN = PS::FILESTRINGUTILS::ExtractFileName(DAnsiStr(vFiles[iFile].c_str()));
-				sqlite_InsertLogRecord(strFN.ptr(), ms, arrInputSignal.size(),
-									   ctFrames, 1, iThread, szWorkMem, ctFrames*szWorkMem, szLLC);
+				U8 simdLen = PS_SIMD_FLEN;
+				if(g_appSettings.bUseSIMD)
+					simdLen = 1;
+
+				U32 ctFiles = MATHMIN(vFiles.size(), g_appSettings.ctFilesToUse);
+				U32 ctFrames = PrintResults();
+				sqlite_InsertLogRecord("TotalFiles", ms, simdLen, ctFrames * FRAME_DATA_COUNT,
+									   ctFrames, 1, iThread, szWorkMem, (ctFrames/ctFiles) * szWorkMem, szLLC);
+				printf("#Files = %u, #FramesTotal = %u\n", ctFiles, ctFrames);
+			}
+		}
+		else
+		{
+			double ms;
+			U32 ctFrames = 0;
+
+			//For all files
+			for(U32 iFile =0; iFile<(U32)g_appSettings.ctFilesToUse; iFile++)
+			{
+				//Arrays to hold values
+				std::vector<float> arrInputSignal;
+				std::vector<float> arrOutputSpectrum;
+
+				tbb::tick_count t0 = tbb::tick_count::now();
+
+				//1. Read Sound Files
+				//U32 ctSamples = CountSamples(vFiles[iFile]);
+				arrInputSignal.reserve(1024 * FRAME_DATA_COUNT);
+				ReadSoundFile(vFiles[iFile], arrInputSignal, 1);
+
+
+				//2. Apply MDCT
+				ctFrames = ApplyMDCT<float>(arrInputSignal, arrOutputSpectrum, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel);
+				/*
+				if(bSimd)
+					SaveCSV<float>("SpectrumSimd.csv", arrOutputSpectrum);
+				else
+					SaveCSV<float>("SpectrumNormal.csv", arrOutputSpectrum);
+					*/
+
+				tbb::tick_count t1 = tbb::tick_count::now();
+				ms = (t1 - t0).seconds() * 1000.0;
+				printf("[%u of %u] File %s processed in %.2f [ms] \n", iFile+1, g_appSettings.ctFilesToUse, vFiles[iFile].c_str(), ms);
+
+				if(g_appSettings.bDisplaySpectrums)
+				{
+					//3. Normalized Output
+					NormalizeData<float>(arrOutputSpectrum);
+
+					vec3f c;
+					c.x = RandRangeT<float>(0.0f, 1.0f);
+					c.y = RandRangeT<float>(0.0f, 1.0f);
+					c.z = RandRangeT<float>(0.0f, 1.0f);
+					g_lpDrawChart->addSeries(arrOutputSpectrum, "Spectrum", 1.0f, vec2f(0.0, 1.5f), c);
+				}
+
+				//Log
+				{
+					U8 simdLen = PS_SIMD_FLEN;
+					if(g_appSettings.bUseSIMD)
+						simdLen = 1;
+
+					DAnsiStr strFN = PS::FILESTRINGUTILS::ExtractFileName(DAnsiStr(vFiles[iFile].c_str()));
+					sqlite_InsertLogRecord(strFN.ptr(), ms, simdLen, arrInputSignal.size(),
+										   ctFrames, 1, iThread, szWorkMem, ctFrames*szWorkMem, szLLC);
+				}
+
+				//Cleanup
+				arrInputSignal.resize(0);
+				arrOutputSpectrum.resize(0);
 			}
 
-			//Cleanup
-			arrInputSignal.resize(0);
-			arrOutputSpectrum.resize(0);
+			//Log Frames Distribution
+			//PrintThreadWorkHistory(g_appSettings.ctFilesToUse);
 		}
-
-		//Log Frames Distribution
-		//PrintThreadWorkHistory(g_appSettings.ctFilesToUse);
 	}
 
 

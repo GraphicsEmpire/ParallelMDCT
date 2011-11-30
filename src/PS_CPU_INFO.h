@@ -9,150 +9,67 @@
 #define PS_CPU_INFO_H_
 
 #include <stddef.h>
-#include <string.h>
 #include "PS_MathBase.h"
 
+#define MAX_CACHE_INFO_LENGTH 5
+#define MAX_CACHE_LEVEL 3
 
-typedef enum CACHE_TYPE {ctNone, ctData, ctInstruction, ctUnified};
+class ProcessorInfo{
 
-struct ProcessorInfo{
+public:
+	enum CACHE_TYPE {ctNone, ctData, ctInstruction, ctUnified};
+	ProcessorInfo() { getAllInfo();}
+	~ProcessorInfo() {}
+
+	void getAllInfo();
+	void getLevelInfo(int level);
+
+#ifdef PS_OS_LINUX
+	static int GetCacheNodeIndex(int level, CACHE_TYPE cacheType = ctUnified);
+#endif
+
+	/*!
+	 * Returns the type of cache in a string format.
+	 */
+	static const char* GetCacheTypeString(CACHE_TYPE t);
+
+	/*!
+	 * Gets the line size for cache
+	 */
+	static U32 GetCacheLineSize();
+
+	/*!
+	 * Returns true if a specified cache level exist
+	 */
+	static bool HasCacheLevel(int level, CACHE_TYPE cacheType = ctUnified);
+
+	/*!
+	 * Gets cache size.
+	 * @param level cache
+	 * @return cache size in Bytes
+	 */
+	static U32 GetCacheSize(int level, CACHE_TYPE cacheType = ctUnified);
+
+	/*!
+	 * Get the type of cache
+	 */
+	static CACHE_TYPE GetCacheType(int level, CACHE_TYPE cacheType = ctUnified);
+
+public:
+
 	U8 ctCores;
-	U8 cache_line_size;
 	U8 simd_float_lines;
-	U32 cache_sizes[4];
-	U8  cache_levels[4];
-	CACHE_TYPE cache_types[4];
-
 	bool bSupportAVX;
 	bool bSupportSSE;
+	bool bOSSupportAVX;
+
+	U8  ctCacheInfo;
+	U8  cache_line_size;
+	U8  cache_levels[MAX_CACHE_INFO_LENGTH];
+	U32 cache_sizes[MAX_CACHE_INFO_LENGTH];
+	CACHE_TYPE cache_types[MAX_CACHE_INFO_LENGTH];
 };
 
-U32 GetCacheLineSize();
-
-#if defined(__APPLE__)
-
-#include <sys/sysctl.h>
-U32 GetCacheLineSize() {
-    U32 line_size = 0;
-    U32 sizeof_line_size = sizeof(line_size);
-    sysctlbyname("hw.cachelinesize", &line_size, &sizeof_line_size, 0, 0);
-    return line_size;
-}
-
-#elif defined(_WIN32)
-
-#include <stdlib.h>
-#include <windows.h>
-U32 GetCacheLineSize() {
-    U32 line_size = 0;
-    DWORD buffer_size = 0;
-    DWORD i = 0;
-    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer = 0;
-
-    GetLogicalProcessorInformation(0, &buffer_size);
-    buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(buffer_size);
-    GetLogicalProcessorInformation(&buffer[0], &buffer_size);
-
-    for (i = 0; i != buffer_size / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION); ++i) {
-        if (buffer[i].Relationship == RelationCache && buffer[i].Cache.Level == 1) {
-            line_size = buffer[i].Cache.LineSize;
-            break;
-        }
-    }
-
-    free(buffer);
-    return line_size;
-}
-
-#elif defined(linux)
-
-#include <stdio.h>
-U32 GetCacheLineSize()
-{
-    FILE * p = 0;
-    p = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
-    U32 i = 0;
-    if (p) {
-        fscanf(p, "%d", &i);
-        fclose(p);
-    }
-    return i;
-}
-
-U8 GetCacheLevel(int index)
-{
-    FILE * p = 0;
-    char chrBuffer[1024];
-
-    sprintf(chrBuffer, "/sys/devices/system/cpu/cpu0/cache/index%d/level", index);
-    p = fopen(chrBuffer, "r");
-    U8 level = 0;
-    if (p) {
-        fscanf(p, "%d", &level);
-        fclose(p);
-    }
-    return level;
-}
-
-const char* GetCacheTypeString(CACHE_TYPE t)
-{
-	if(t == ctData)
-		return "DATA";
-	else if(t == ctInstruction)
-		return "INSTRUCTION";
-	else if(t == ctUnified)
-		return "UNIFIED";
-	else
-		return "NONE";
-}
-
-U32 GetCacheSize(int index, bool bInKiloBytes = true)
-{
-    FILE * p = 0;
-    char chrBuffer[1024];
-
-    sprintf(chrBuffer, "/sys/devices/system/cpu/cpu0/cache/index%d/size", index);
-    p = fopen(chrBuffer, "r");
-    U32 i = 0;
-    if (p) {
-        fscanf(p, "%dK", &i);
-        fclose(p);
-    }
-
-    if(!bInKiloBytes)
-    	i *= 1024;
-
-    return i;
-}
-
-CACHE_TYPE GetCacheType(int index)
-{
-    FILE * p = 0;
-    char chrBuffer[1024];
-
-    sprintf(chrBuffer, "/sys/devices/system/cpu/cpu0/cache/index%d/type", index);
-    p = fopen(chrBuffer, "r");
-
-    CACHE_TYPE cacheType = ctNone;
-    if (p) {
-    	fscanf(p,"%s", chrBuffer);
-
-    	if(strcmp(chrBuffer, "Data") == 0)
-    		cacheType = ctData;
-    	else if(strcmp(chrBuffer, "Instruction") == 0)
-    		cacheType = ctInstruction;
-    	else if(strcmp(chrBuffer, "Unified") == 0)
-    		cacheType = ctUnified;
-
-    	fclose(p);
-    }
-
-    return cacheType;
-}
-
-#else
-#error Unrecognized platform
-#endif
 
 
 #endif /* PS_CPU_INFO_H_ */

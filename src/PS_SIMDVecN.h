@@ -1,10 +1,14 @@
 #ifndef PS_SIMDVECN_H
 #define PS_SIMDVECN_H
 
-#include <malloc.h>
 #include "PS_VectorMath.h"
+#include <malloc.h>
 
-#define __OPTIMIZE__ 1
+#if defined(PS_OS_WINDOWS)
+	#include "windows.h"
+	#include "intrin.h"
+#endif
+
 //Enable the SIMD Length Here
 #define SIMD_USE_M128
 //#define SIMD_USE_M256
@@ -14,64 +18,45 @@
 #define PS_L1_CACHE_LINE_SIZE 64
 #endif
 
-
-/////////////////////////////////////////////////////////////////////////
-//Global Functions
-
-//CPUID handy function to read Processor features
-#if defined(_MSC_VER)
-	#define cpuid(func,a,b,c,d)\
-		asm {\
-		mov	eax, func\
-		cpuid\
-		mov	a, eax\
-		mov	b, ebx\
-		mov	c, ecx\
-		mov	d, edx\
-		}
-#elif defined(__GNUC__)
-	#define cpuid(func,ax,bx,cx,dx)\
-		__asm__ __volatile__ ("cpuid":\
-		"=a" (ax), "=b" (bx), "=c" (cx), "=d" (dx) : "a" (func));
-#endif
-
-/*
-#define SupportFeature(CONST)\
-   __asm__ __volatile__ ("; result returned in eax":\
-   "mov eax, 1":\
-   "cpuid":\
-   "and ecx," (CONST) :\
-   cmp ecx, CONSTANT; check desired feature flags
-   jne not_supported
-   ; processor supports features
-   mov ecx, 0; specify 0 for XFEATURE_ENABLED_MASK register
-   XGETBV; result in EDX:EAX
-   and eax, 06H
-   cmp eax, 06H; check OS has enabled both XMM and YMM state support
-   jne not_supported
-   mov eax, 1; mark as supported
-   jmp done
-   NOT_SUPPORTED:
-   mov eax, 0 ; // mark as not supported
-   done:
-*/
-
-
 #define OSXSAVEFlag (1UL<<27)
 #define AVXFlag     ((1UL<<28)|OSXSAVEFlag)
 #define FMAFlag     ((1UL<<12)|AVXFlag|OSXSAVEFlag)
 #define CLMULFlag   ((1UL<< 1)|AVXFlag|OSXSAVEFlag)
 #define VAESFlag    ((1UL<<25)|AVXFlag|OSXSAVEFlag)
+/////////////////////////////////////////////////////////////////////////
+//Global Functions
 
+inline void PS_PREFETCH(void *lpBuffer)
+{
+#if defined(PS_OS_WINDOWS)
+	PreFetchCacheLine(PF_TEMPORAL_LEVEL_1, lpBuffer);
+#else
+	__builtin_prefetch(lpBuffer);
+#endif
+}
 
+//CPUID handy function to read Processor features
+#if defined(PS_OS_LINUX)
+	#define cpuid(func,ax,bx,cx,dx)\
+		__asm__ __volatile__ ("cpuid":\
+		"=a" (ax), "=b" (bx), "=c" (cx), "=d" (dx) : "a" (func));
+#endif
 
 inline bool SimdDetectFeature(U32 idFeature)
 {
+#if defined(PS_OS_WINDOWS)
+	int CPUInfo[4] = {0};
+	__cpuid( CPUInfo, 1 );
+	if( (CPUInfo[3] & idFeature ) == 1)
+		return true;
+	return false;
+#elif defined(PS_OS_LINUX)
 	int EAX, EBX, ECX, EDX;
 	cpuid(0, EAX, EBX, ECX, EDX);
-	if((ECX & idFeature) != idFeature)
-		return false;
-	return true;
+	if((ECX & idFeature) == idFeature)
+		return true;
+	return false;
+#endif
 }
 
 /*
@@ -89,7 +74,7 @@ inline U64 GetTicks()
 // Memory Allocation Functions
 inline void *AllocAligned(U32 size)
 {
-#if defined(PS_IS_WINDOWS)
+#if defined(PS_OS_WINDOWS)
     return _aligned_malloc(size, PS_L1_CACHE_LINE_SIZE);
 #elif defined (PS_IS_OPENBSD) || defined(PS_IS_APPLE)
     // Allocate excess memory to ensure an aligned pointer can be returned
@@ -129,8 +114,11 @@ inline void FreeAligned(void *ptr)
 
 //128 bit SIMD
 #ifdef SIMD_USE_M128
-	#include <xmmintrin.h>
+#if defined(PS_OS_LINUX)
 	#include <x86intrin.h>
+#endif
+	#include <xmmintrin.h>
+//	#include <pmmintrin.h>
 
 	#define PS_SIMD_FLEN	4
 	#define PS_SIMD_ALIGN_SIZE 16
@@ -163,10 +151,7 @@ inline void FreeAligned(void *ptr)
 
 #endif
 
-
-
-
-
+	
 // gives the number of SIMD blocks necessary for _SIZE_ elements
 #define	PS_SIMD_BLOCKS(_SIZE_)			(((unsigned)(_SIZE_) + (PS_SIMD_FLEN-1)) / PS_SIMD_FLEN)
 
@@ -275,6 +260,7 @@ struct VecNMask
 		u.m[3] = d;
 	}
 
+	void setMask( const __m128 &from )	{	u.v = from; }
 	friend VecNMask CmpMaskEQ( const VecNMask &lval, const VecNMask &rval ) { return _mm_cmpeq_ps( lval.u.v, rval.u.v );  }
 	friend VecNMask CmpMaskNE( const VecNMask &lval, const VecNMask &rval ) { return _mm_cmpneq_ps( lval.u.v, rval.u.v ); }
 
@@ -366,7 +352,6 @@ inline __m128 SimdDoubleSafeSine( __m128 x4 )
     return SIMDSine( x4 );
 }
 
-
 #endif
 
 //===================================================================================
@@ -398,6 +383,7 @@ struct VecNMask
 		u.m[7] = h;
 	}
 
+	void setMask( const __m256 &from )	{	u.v = from; }
 	friend VecNMask CmpMaskEQ( const VecNMask &lval, const VecNMask &rval ) { return _mm256_cmp_ps( lval.u.v, rval.u.v, _CMP_EQ_OQ ); }
 	friend VecNMask CmpMaskNE( const VecNMask &lval, const VecNMask &rval ) { return _mm256_cmp_ps( lval.u.v, rval.u.v, _CMP_NEQ_OQ ); }
 
@@ -496,6 +482,16 @@ public:
 	}
 
 
+	friend inline VecN SimdhAdd(const VecN &a, const VecN &b)
+	{
+		VecN result;
+		__m128 abOdd = _mm_shuffle_ps(a.v, b.v, _MM_SHUFFLE(2, 0, 2, 0));
+		__m128 abEven = _mm_shuffle_ps(a.v, b.v, _MM_SHUFFLE(3, 1, 3, 1));
+		return _mm_add_ps(abOdd, abEven);
+	}
+
+
+
 	//Logical
 	friend inline VecN	SimdAnd( const VecN &lval, const VecN &rval )	{ return _mm_and_ps( lval.v, rval.v );	}
 	friend inline VecN	SimdOr ( const VecN &lval, const VecN &rval )	{ return _mm_or_ps( lval.v, rval.v );	}
@@ -568,6 +564,7 @@ public:
 		return fast_pow(lval.v, rval.v);
 	}
 
+	friend inline VecN SimdhAdd(const VecN &lval, const VecN &rval) { return _mm256_and_ps( lval.v, rval.v );	}
 
 	//Logical
 	friend VecN	SimdAnd( const VecN &lval, const VecN &rval )	{ return _mm256_and_ps( lval.v, rval.v );	}
@@ -730,16 +727,14 @@ typedef __declspec(align(PS_SIMD_ALIGN_SIZE)) vec4< VecN<float,PS_SIMD_FLEN> >	F
 
 #elif defined(__GNUC__)
 
-//#define PS_SIMD_ALIGN_BEGIN()
-//#define PS_SIMD_ALIGN_END)
-
 typedef	VecN<float,PS_SIMD_FLEN>			Float_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
-typedef	VecN<int,PS_SIMD_FLEN>				Int_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
-typedef	VecN<U8,PS_SIMD_FLEN>				Bool_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
 
-typedef	vec2< VecN<float,PS_SIMD_FLEN> >	Float2_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
-typedef	vec3< VecN<float,PS_SIMD_FLEN> >	Float3_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
-typedef	vec4< VecN<float,PS_SIMD_FLEN> >	Float4_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
+//typedef	VecN<int,PS_SIMD_FLEN>				Int_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
+//typedef	VecN<U8,PS_SIMD_FLEN>				Bool_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
+
+//typedef	vec2< VecN<float,PS_SIMD_FLEN> >	Float2_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
+//typedef	vec3< VecN<float,PS_SIMD_FLEN> >	Float3_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
+//typedef	vec4< VecN<float,PS_SIMD_FLEN> >	Float4_ __attribute__ ((aligned(PS_SIMD_ALIGN_SIZE)));
 
 #endif
 

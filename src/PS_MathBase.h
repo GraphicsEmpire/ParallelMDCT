@@ -7,10 +7,26 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#ifdef linux
+#ifdef WIN32
+	#define PS_OS_WINDOWS 1
+#elif defined(__linux__) || defined(linux)
+	#define	PS_OS_LINUX	1
+#endif 
+
+#ifdef _MSC_VER
+	#define PS_COMPILER_MS
+#elif defined(__GNUC__)
+	#define PS_COMPILER_GNU
+#endif
+
+#ifdef PS_OS_LINUX
 	#include <cmath>
 	#include <cfloat>
 #endif
+
+#define PS_PLUS_INFINITY FLT_MAX
+#define PS_MINUS_INFINITY -1.0f*FLT_MAX
+
 
 #ifndef SAFE_DELETE
 	#define SAFE_DELETE(p) { if(p) {delete (p); (p) = NULL;}}
@@ -247,25 +263,6 @@ __inline T RandRangeT(T nMin, T nMax)
 	T r = static_cast<T>(rand())/(static_cast<T>(RAND_MAX) + 1);
 	// transform to wanted range
 	return nMin + r*(nMax - nMin);
-}
-
-//Fitting parabola y = A + Bx + Cx^2 = 0 with constraints of:
-//A = 0 and A + B(pi/2) + C(pi/2)^2 = 1 and A + B(pi) + C(pi)^2 = 0
-//http://www.uc-forum.com/forum/c-and-c/57668-fast-sine-and-cosine-simd.html
-__inline float FastSine(float x)
-{
-	const float B = 4/Pi;
-	const float C = -4/(Pi*Pi);
-
-	float y = B * x + C * x * Absolutef(x);
-
-	//Fitting parabola
-	 #ifdef EXTRA_PRECISION
-	// const float Q = 0.775;
-	const float P = 0.225;
-		y = P * (y * Absolutef(y) - y) + y; // Q * y + P * y * abs(y)
-	#endif
-	return y;
 }
 
 
