@@ -29,6 +29,7 @@ void CommonKernel(const void* lpInput, void* lpOutput)
 	Float_ two(2.0f);
 	Float_ Ndiv2PlusOne(hn + 1.0f);
 
+	float PS_SIMD_ALIGN(arrDataCos[PS_SIMD_FLEN]);
 	float PS_SIMD_ALIGN(arrM[PS_SIMD_FLEN]);
 	for(int iSimd=0; iSimd<PS_SIMD_FLEN; iSimd++)
 		arrM[iSimd] = iSimd;
@@ -50,8 +51,17 @@ void CommonKernel(const void* lpInput, void* lpOutput)
 				//dd[iSimd] = dd[iSimd] + xm[iSimd] * cos(angle[iSimd]);
 			dd = dd + xm * cos_ps(angle.v);
 			mm = mm + ii;
-#else
+#elif defined(SIMD_USE_M256)
+			angle.store(&arrDataCos[0]);
 
+			__m128 xLo = _mm_load_ps(&arrDataCos[0]);
+			__m128 xHi = _mm_load_ps(&arrDataCos[4]);
+			xLo = cos_ps(xLo);
+			xHi = cos_ps(xHi);
+			_mm_store_ps(&arrDataCos[0], xLo);
+			_mm_store_ps(&arrDataCos[4], xHi);
+
+			angle = Float_(arrDataCos);
 #endif
 		}
 
@@ -70,6 +80,7 @@ void CosineTest()
 	float PS_SIMD_ALIGN(arrData[2048]);
 	float PS_SIMD_ALIGN(arrOutput1[2048]);
 	float PS_SIMD_ALIGN(arrOutput2[2048]);
+	float PS_SIMD_ALIGN(arrDataCos[16]);
 	for(U32 i=0; i<2048; i++)
 	{
 		arrData[i] = RandRangeT<float>(0.0f, 10.0f);
@@ -81,8 +92,19 @@ void CosineTest()
 	{
 		Float_ x = Float_(&arrData[i * PS_SIMD_FLEN]);
 		//x = SIMDCosine(x.v);
+#ifdef SIMD_USE_M128
 		x = cos_ps(x.v);
+#elif defined(SIMD_USE_M256)
+		x.store(&arrDataCos[0]);
 
+		__m128 xLo = _mm_load_ps(&arrDataCos[0]);
+		__m128 xHi = _mm_load_ps(&arrDataCos[4]);
+		xLo = cos_ps(xLo);
+		xHi = cos_ps(xHi);
+		_mm_store_ps(&arrDataCos[0], xLo);
+		_mm_store_ps(&arrDataCos[4], xHi);
+		x = Float_(arrDataCos);
+#endif
 		x.store(&arrOutput2[i * PS_SIMD_FLEN]);
 	}
 
