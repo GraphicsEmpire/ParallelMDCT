@@ -689,37 +689,20 @@ int main(int argc, char* argv[])
 				g_appSettings.ctThreads, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel, g_appSettings.bProcessBatchInParallel);
 
 
+		//Report Total Time Spent
+		tbb::tick_count t0 = tbb::tick_count::now();
+
+		U32 ctTotalFrames = 0;
 		if(g_appSettings.bProcessBatchInParallel)
 		{
-			//ProcessBatched(const std::vector<string>& vFiles, bool bUseSimd, bool bCopyParallel)
-			tbb::tick_count t0 = tbb::tick_count::now();
-
 			U32 ctFiles = MATHMIN(g_appSettings.ctFilesToUse, vFiles.size());
 			ProcessBatched body(vFiles, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel);
 			tbb::parallel_for(blocked_range<size_t>(0, ctFiles), body, tbb::auto_partitioner());
-
-			tbb::tick_count t1 = tbb::tick_count::now();
-			double ms = (t1 - t0).seconds() * 1000.0;
-			printf("[%u of %u] Files are processed in %.2f [ms].\n", g_appSettings.ctFilesToUse, vFiles.size(), ms);
-
-			//Log
-			{
-				U8 simdLen = PS_SIMD_FLEN;
-				if(g_appSettings.bUseSIMD)
-					simdLen = 1;
-
-				U32 ctFiles = MATHMIN(vFiles.size(), g_appSettings.ctFilesToUse);
-				U32 ctFrames = PrintResults();
-				sqlite_InsertLogRecord("TotalFiles", ms, simdLen, ctFrames * FRAME_DATA_COUNT,
-									   ctFrames, 1, iThread, szWorkMem, (ctFrames/ctFiles) * szWorkMem, szLLC);
-				printf("#Files = %u, #FramesTotal = %u\n", ctFiles, ctFrames);
-			}
 		}
 		else
 		{
 			double ms;
 			U32 ctFrames = 0;
-
 			//For all files
 			for(U32 iFile =0; iFile<(U32)g_appSettings.ctFilesToUse; iFile++)
 			{
@@ -727,16 +710,15 @@ int main(int argc, char* argv[])
 				std::vector<float> arrInputSignal;
 				std::vector<float> arrOutputSpectrum;
 
-				tbb::tick_count t0 = tbb::tick_count::now();
+				tbb::tick_count pt0 = tbb::tick_count::now();
 
 				//1. Read Sound Files
-				//U32 ctSamples = CountSamples(vFiles[iFile]);
 				arrInputSignal.reserve(1024 * FRAME_DATA_COUNT);
 				ReadSoundFile(vFiles[iFile], arrInputSignal, 1);
 
-
 				//2. Apply MDCT
 				ctFrames = ApplyMDCT<float>(arrInputSignal, arrOutputSpectrum, g_appSettings.bUseSIMD, g_appSettings.bCopyParallel);
+				ctTotalFrames += ctFrames;
 				/*
 				if(bSimd)
 					SaveCSV<float>("SpectrumSimd.csv", arrOutputSpectrum);
@@ -744,8 +726,8 @@ int main(int argc, char* argv[])
 					SaveCSV<float>("SpectrumNormal.csv", arrOutputSpectrum);
 					*/
 
-				tbb::tick_count t1 = tbb::tick_count::now();
-				ms = (t1 - t0).seconds() * 1000.0;
+				tbb::tick_count pt1 = tbb::tick_count::now();
+				ms = (pt1 - pt0).seconds() * 1000.0;
 				printf("[%u of %u] File %s processed in %.2f [ms] \n", iFile+1, g_appSettings.ctFilesToUse, vFiles[iFile].c_str(), ms);
 
 				if(g_appSettings.bDisplaySpectrums)
@@ -763,7 +745,7 @@ int main(int argc, char* argv[])
 				//Log
 				{
 					U8 simdLen = PS_SIMD_FLEN;
-					if(g_appSettings.bUseSIMD)
+					if(!g_appSettings.bUseSIMD)
 						simdLen = 1;
 
 					DAnsiStr strFN = PS::FILESTRINGUTILS::ExtractFileName(DAnsiStr(vFiles[iFile].c_str()));
@@ -775,10 +757,35 @@ int main(int argc, char* argv[])
 				arrInputSignal.resize(0);
 				arrOutputSpectrum.resize(0);
 			}
-
-			//Log Frames Distribution
-			//PrintThreadWorkHistory(g_appSettings.ctFilesToUse);
 		}
+
+
+		//Stop Process
+		tbb::tick_count t1 = tbb::tick_count::now();
+		double msTotal = (t1 - t0).seconds() * 1000.0;
+
+		//Log
+		{
+			U32 ctFiles = MATHMIN(vFiles.size(), g_appSettings.ctFilesToUse);
+			U8 simdLen = PS_SIMD_FLEN;
+			if(!g_appSettings.bUseSIMD)
+				simdLen = 1;
+
+			string strTitle;
+			if(g_appSettings.bProcessBatchInParallel)
+			{
+				ctTotalFrames = PrintResults();
+				strTitle = "Total Process Batch";
+			}
+			else
+				strTitle = "Total Process Sequential";
+
+			//Log
+			sqlite_InsertLogRecord(strTitle.c_str(), msTotal, simdLen, ctTotalFrames * FRAME_DATA_COUNT,
+							   	   ctTotalFrames, 1, iThread, szWorkMem, (ctTotalFrames/ctFiles) * szWorkMem, szLLC);
+			printf("#FilesProcessed = %u, #FramesTotal = %u, TotalTime= %0.2f\n", ctFiles, ctTotalFrames, msTotal);
+		}
+
 	}
 
 
