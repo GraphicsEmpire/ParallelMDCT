@@ -765,8 +765,9 @@ int main(int argc, char* argv[])
 		double msTotal = (t1 - t0).seconds() * 1000.0;
 
 		//Log
+		U32 ctFiles = MATHMIN(vFiles.size(), g_appSettings.ctFilesToUse);
+		if(ctFiles > 0)
 		{
-			U32 ctFiles = MATHMIN(vFiles.size(), g_appSettings.ctFilesToUse);
 			U8 simdLen = PS_SIMD_FLEN;
 			if(!g_appSettings.bUseSIMD)
 				simdLen = 1;
